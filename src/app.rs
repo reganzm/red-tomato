@@ -26,9 +26,9 @@ mod white_text_theme {
     pub const TEXT_DIM: (u8, u8, u8) = (200, 200, 210);
 }
 
-/// 紧凑 overlay 尺寸（保证「继续」等按钮完整显示）
+/// 紧凑 overlay 尺寸（保证进度条+「开始/暂停」按钮完整显示，留足垂直空间以兼容高 DPI/缩放）
 const COMPACT_WIDTH: f32 = 300.0;
-const COMPACT_HEIGHT: f32 = 165.0;
+const COMPACT_HEIGHT: f32 = 228.0;
 
 /// 设置中文字体，避免中文乱码。优先使用系统自带字体。
 fn setup_chinese_fonts(ctx: &egui::Context) {
@@ -254,10 +254,11 @@ fn apply_pin(ctx: &egui::Context) -> bool {
     }
 }
 
-/// 取消 pin：恢复普通窗口层级
+/// 取消 pin：恢复普通窗口层级并立即恢复完整窗口尺寸，避免下一帧仍用紧凑尺寸绘制完整界面
 fn apply_unpin(ctx: &egui::Context) {
     use egui::viewport::{ViewportCommand, WindowLevel};
     ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::Normal));
+    ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(FULL_SIZE.0, FULL_SIZE.1)));
 }
 
 /// 绘制 subtle 几何背景（类似 WhiteText 的深色质感）
@@ -554,7 +555,9 @@ impl RedTomatoApp {
                     ui.label("完成时间 · 专注时长 · 番茄数(同任务累计) · 任务");
                     ui.add_space(6.0);
                     let rows = Self::focus_rows_sorted_with_cumulative_tomatoes(&self.focus_history);
-                    egui::ScrollArea::vertical().show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(280.0)
+                        .show(ui, |ui| {
                         for (r, tomato_display) in rows {
                             let mins = r.duration_secs / 60;
                             let secs = r.duration_secs % 60;
@@ -777,7 +780,7 @@ impl RedTomatoApp {
                             self.pinned = false;
                             self.compact = false;
                             self.compact_size_applied = false;
-                            self.full_restore_applied = false;
+                            self.full_restore_applied = true; // apply_unpin 内已发 InnerSize，避免下一帧重复
                             apply_unpin(ctx);
                         }
                         ui.add_space(ui.available_width() - 40.0);

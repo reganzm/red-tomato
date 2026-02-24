@@ -79,7 +79,7 @@ pub fn load_focus_records(conn: &Connection, limit: u32) -> Result<Vec<FocusRow>
             task: row.get(1)?,
             duration_secs: row.get(2)?,
             completed_at: row.get(3)?,
-            completed_pomodoros: row.get::<_, i64>(4)? as u32,
+            completed_pomodoros: row.get(4)?,
         })
     })?;
     rows.collect()

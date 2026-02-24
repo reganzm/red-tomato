@@ -43,7 +43,7 @@ fn main() -> eframe::Result<()> {
     let icon = make_app_icon();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([380.0, 420.0])
+            .with_inner_size([380.0, 540.0])
             .with_title("红番茄")
             .with_decorations(false) // 无系统标题栏，与钉住模式一致，仅保留自定义顶栏
             .with_icon(icon),

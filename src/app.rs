@@ -86,8 +86,8 @@ fn setup_chinese_fonts(ctx: &egui::Context) {
     }
 }
 
-/// 完整模式默认窗口尺寸
-const FULL_SIZE: (f32, f32) = (380.0, 420.0);
+/// 完整模式默认窗口尺寸（高度留足，避免高 DPI/缩放下底部按钮被裁切）
+const FULL_SIZE: (f32, f32) = (380.0, 540.0);
 
 /// 存储键：任务 + 番茄钟状态 + 专注历史（JSON）
 const STORAGE_KEY_STATE: &str = "red_tomato_state";
@@ -163,6 +163,8 @@ pub struct RedTomatoApp {
     compact_size_applied: bool,
     /// 从紧凑回到完整时，是否已恢复尺寸
     full_restore_applied: bool,
+    /// 启动时是否已强制设置过完整窗口尺寸（覆盖 eframe 持久化恢复的小窗口）
+    initial_full_size_applied: bool,
     /// 非钉住模式下是否已去掉系统标题栏（与钉住模式一致，仅保留自定义顶栏）
     full_no_decorations_applied: bool,
     /// 是否已去掉标题栏左上角系统菜单（仅 Windows 非紧凑模式，有标题栏时用）
@@ -183,6 +185,7 @@ impl Default for RedTomatoApp {
             pin_applied: false,
             compact_size_applied: false,
             full_restore_applied: true,
+            initial_full_size_applied: false,
             full_no_decorations_applied: false,
             system_menu_removed: false,
             show_about: false,
@@ -434,6 +437,15 @@ impl eframe::App for RedTomatoApp {
             self.pin_applied = apply_pin(ctx);
         }
 
+        // 启动时若为完整模式：强制设一次窗口尺寸，避免 eframe 持久化恢复成小窗口导致界面被裁切
+        if !self.compact && !self.initial_full_size_applied {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                FULL_SIZE.0,
+                FULL_SIZE.1,
+            )));
+            self.initial_full_size_applied = true;
+        }
+
         // 紧凑模式（钉到右上角）：小窗 + 无标题栏
         if self.compact && !self.compact_size_applied {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
@@ -622,29 +634,27 @@ impl RedTomatoApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(BG_RGB.0, BG_RGB.1, BG_RGB.2)))
             .show(ctx, |ui| {
+                // 顶栏单独占满宽度，关闭按钮固定右上角
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new("📌").frame(false))
+                        .on_hover_text("钉到桌面右上角")
+                        .clicked()
+                    {
+                        self.pinned = true;
+                        self.compact = true;
+                        self.compact_size_applied = false;
+                        self.pin_applied = false;
+                    }
+                    ui.add_space(ui.available_width() - 32.0);
+                    let close_btn = egui::Button::new(egui::RichText::new("×").size(18.0)).frame(false);
+                    if ui.add_sized(egui::vec2(32.0, 32.0), close_btn).on_hover_text("关闭").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+                ui.add_space(12.0);
+
                 ui.vertical_centered(|ui| {
-                    // 顶行：与钉住模式一致，仅钉子图标 + 关闭按钮（.frame(false) 无边框）
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(egui::Button::new("📌").frame(false))
-                            .on_hover_text("钉到桌面右上角")
-                            .clicked()
-                        {
-                            self.pinned = true;
-                            self.compact = true;
-                            self.compact_size_applied = false;
-                            self.pin_applied = false;
-                        }
-                        ui.add_space(ui.available_width() - 40.0);
-                        if ui
-                            .add(egui::Button::new("×").frame(false))
-                            .on_hover_text("关闭")
-                            .clicked()
-                        {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
-                    ui.add_space(12.0);
 
                     // 当前任务：与番茄钟关联，专注时明确「在做哪件事」
                     ui.horizontal(|ui| {
@@ -769,29 +779,28 @@ impl RedTomatoApp {
                 // 背景几何图案（类似 WhiteText 的质感）
                 paint_subtle_pattern(ui, rect);
 
+                // 顶栏：取消钉住（左）+ 关闭固定右上角（右）
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new("📌").frame(false))
+                        .on_hover_text("取消钉住，恢复完整窗口")
+                        .clicked()
+                    {
+                        self.pinned = false;
+                        self.compact = false;
+                        self.compact_size_applied = false;
+                        self.full_restore_applied = true; // apply_unpin 内已发 InnerSize，避免下一帧重复
+                        apply_unpin(ctx);
+                    }
+                    ui.add_space(ui.available_width() - 32.0);
+                    let close_btn = egui::Button::new(egui::RichText::new("×").size(18.0)).frame(false);
+                    if ui.add_sized(egui::vec2(32.0, 32.0), close_btn).on_hover_text("关闭").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+                ui.add_space(2.0);
+
                 ui.vertical_centered(|ui| {
-                    // 顶行：取消钉住（左，钉子图标）+ 关闭（右）
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(egui::Button::new("📌").frame(false))
-                            .on_hover_text("取消钉住，恢复完整窗口")
-                            .clicked()
-                        {
-                            self.pinned = false;
-                            self.compact = false;
-                            self.compact_size_applied = false;
-                            self.full_restore_applied = true; // apply_unpin 内已发 InnerSize，避免下一帧重复
-                            apply_unpin(ctx);
-                        }
-                        ui.add_space(ui.available_width() - 40.0);
-                        if ui
-                            .add(egui::Button::new("×").frame(false))
-                            .on_hover_text("关闭")
-                            .clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
-                    ui.add_space(2.0);
 
                     // 钉住模式下显示当前任务（若有），便于专注时看到「在做哪件事」
                     if !self.current_task.is_empty() {
@@ -840,14 +849,16 @@ impl RedTomatoApp {
                     ui.add(bar);
                     ui.add_space(6.0);
 
-                    // 开始/暂停（一个按钮切换），按可用宽度分配
-                    let compact_btn = egui::vec2(72.0, 28.0);
+                    // 开始/暂停（一个按钮）：整行居中，避免钉住后偏左显得尴尬
+                    let compact_btn = egui::vec2(88.0, 30.0);
                     ui.horizontal(|ui| {
                         let (label, action) = match self.pomo.state {
                             TimerState::Idle => ("开始", 0u8),
                             TimerState::Running => ("暂停", 1u8),
                             TimerState::Paused => ("继续", 2u8),
                         };
+                        let full_width = ui.available_width();
+                        ui.add_space((full_width - compact_btn.x) * 0.5);
                         if centered_button(ui, label, compact_btn).clicked() {
                             if action == 0 {
                                 self.pomo.start();

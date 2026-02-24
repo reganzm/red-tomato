@@ -34,9 +34,9 @@ impl Default for PomodoroConfig {
     fn default() -> Self {
         Self {
             // 调试用：专注 1 分钟，短休息 30 秒，长休息 50 秒；正式可改为 25*60, 5*60, 15*60
-            focus_secs: 60,
-            short_break_secs: 30,
-            long_break_secs: 50,
+            focus_secs: 60*25,
+            short_break_secs: 60*5,
+            long_break_secs: 15*60,
             pomodoros_before_long: 4,
         }
     }

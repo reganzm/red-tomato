@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod db;
 mod pomodoro;
 
 /// 生成应用图标：番茄红圆形，透明背景（48×48，任务栏/窗口更清晰）

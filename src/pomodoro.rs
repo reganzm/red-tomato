@@ -38,6 +38,11 @@ impl Default for PomodoroConfig {
             short_break_secs: 60*5,
             long_break_secs: 15*60,
             pomodoros_before_long: 4,
+
+            // focus_secs: 20,
+            // short_break_secs: 5,
+            // long_break_secs: 10,
+            // pomodoros_before_long: 4,
         }
     }
 }
@@ -53,6 +58,8 @@ pub struct PomodoroState {
     pub last_tick_at: Option<DateTime<Utc>>,
     /// 本帧刚结束的阶段（用于触发提示音等），取走后清空
     pub finished_phase: Option<Phase>,
+    /// 刚完成的一次专注的时长（秒），供记录历史用，取走后清空
+    pub last_completed_focus_duration_secs: Option<i64>,
 }
 
 impl Default for PomodoroState {
@@ -66,6 +73,7 @@ impl Default for PomodoroState {
             completed_pomodoros: 0,
             last_tick_at: None,
             finished_phase: None,
+            last_completed_focus_duration_secs: None,
         }
     }
 }
@@ -114,6 +122,13 @@ impl PomodoroState {
         self.last_tick_at = None;
     }
 
+    /// 重置番茄数、阶段回到专注，并停止（用于「重置」/「完成」按钮）
+    pub fn reset_pomodoros_and_stop(&mut self) {
+        self.completed_pomodoros = 0;
+        self.phase = Phase::Focus;
+        self.stop();
+    }
+
     /// 选择阶段并进入 Idle（用户可再点开始）
     pub fn set_phase(&mut self, phase: Phase) {
         self.phase = phase;
@@ -140,11 +155,15 @@ impl PomodoroState {
 
     fn on_phase_finished(&mut self) {
         let just_finished = self.phase;
+        let total_secs = self.phase_total_secs;
         self.finished_phase = Some(just_finished);
         self.state = TimerState::Idle;
         self.remaining_secs = 0;
         self.phase_total_secs = 0;
         self.last_tick_at = None;
+        if just_finished == Phase::Focus {
+            self.last_completed_focus_duration_secs = Some(total_secs);
+        }
 
         match self.phase {
             Phase::Focus => {
@@ -173,6 +192,11 @@ impl PomodoroState {
     /// 取走“刚结束的阶段”（用于播提示音等），取走后清空
     pub fn take_finished_phase(&mut self) -> Option<Phase> {
         self.finished_phase.take()
+    }
+
+    /// 取走刚完成的一次专注的时长（秒），用于记录历史，取走后清空
+    pub fn take_last_completed_focus_duration(&mut self) -> Option<i64> {
+        self.last_completed_focus_duration_secs.take()
     }
 
     /// 当前阶段进度 0.0..=1.0

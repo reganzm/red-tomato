@@ -1,9 +1,10 @@
-//! egui 主界面：计时显示、阶段选择、开始/暂停、番茄数
+//! egui 主界面：计时显示、阶段选择、开始/暂停、番茄数、任务与专注历史持久化
 
 use eframe::egui;
 use egui::emath::NumExt;
-use chrono::Utc;
+use chrono::{FixedOffset, Utc};
 use raw_window_handle::HasWindowHandle;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::pomodoro::{Phase, PomodoroState, TimerState};
@@ -25,7 +26,7 @@ mod white_text_theme {
     pub const TEXT_DIM: (u8, u8, u8) = (200, 200, 210);
 }
 
-/// 紧凑 overlay 尺寸（保证「继续」「停止」等按钮完整显示）
+/// 紧凑 overlay 尺寸（保证「继续」等按钮完整显示）
 const COMPACT_WIDTH: f32 = 300.0;
 const COMPACT_HEIGHT: f32 = 165.0;
 
@@ -88,8 +89,74 @@ fn setup_chinese_fonts(ctx: &egui::Context) {
 /// 完整模式默认窗口尺寸
 const FULL_SIZE: (f32, f32) = (380.0, 420.0);
 
+/// 存储键：任务 + 番茄钟状态 + 专注历史（JSON）
+const STORAGE_KEY_STATE: &str = "red_tomato_state";
+
+/// 北京时区 UTC+8（专注记录完成时间用）
+fn beijing_now_rfc3339() -> String {
+    let beijing = FixedOffset::east_opt(8 * 3600).unwrap();
+    Utc::now().with_timezone(&beijing).to_rfc3339()
+}
+
+/// 单条专注记录：用于按时间统计做了哪些任务（与 SQLite focus_records 表一致）
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FocusRecord {
+    pub task: String,
+    pub duration_secs: i64,
+    /// 完成时间 ISO 8601
+    pub completed_at: String,
+    /// 完成时的番茄数（本周期内）
+    pub completed_pomodoros: u32,
+}
+
+/// 持久化到 eframe storage 的会话状态（专注历史存 SQLite，不在此）
+#[derive(Serialize, Deserialize)]
+struct PersistedState {
+    current_task: String,
+    phase: String,
+    state: String,
+    remaining_secs: i64,
+    phase_total_secs: i64,
+    completed_pomodoros: u32,
+}
+
+fn phase_to_str(p: Phase) -> &'static str {
+    match p {
+        Phase::Focus => "Focus",
+        Phase::ShortBreak => "ShortBreak",
+        Phase::LongBreak => "LongBreak",
+    }
+}
+fn phase_from_str(s: &str) -> Phase {
+    match s {
+        "ShortBreak" => Phase::ShortBreak,
+        "LongBreak" => Phase::LongBreak,
+        _ => Phase::Focus,
+    }
+}
+fn state_to_str(s: TimerState) -> &'static str {
+    match s {
+        TimerState::Idle => "Idle",
+        TimerState::Running => "Running",
+        TimerState::Paused => "Paused",
+    }
+}
+fn state_from_str(s: &str) -> TimerState {
+    match s {
+        "Running" => TimerState::Running,
+        "Paused" => TimerState::Paused,
+        _ => TimerState::Idle,
+    }
+}
+
 pub struct RedTomatoApp {
     pub pomo: PomodoroState,
+    /// 当前专注任务（本番茄要完成的事），与番茄工作法关联
+    pub current_task: String,
+    /// 专注历史：每次完成一个番茄记录一条，用于按时间统计
+    pub focus_history: Vec<FocusRecord>,
+    /// 是否显示「统计」窗口
+    show_statistics: bool,
     compact: bool,
     pinned: bool,
     pin_applied: bool,
@@ -108,6 +175,9 @@ impl Default for RedTomatoApp {
     fn default() -> Self {
         Self {
             pomo: PomodoroState::default(),
+            current_task: String::new(),
+            focus_history: Vec::new(),
+            show_statistics: false,
             compact: false,
             pinned: false,
             pin_applied: false,
@@ -279,7 +349,43 @@ fn play_phase_finished_sound() {
 impl RedTomatoApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         setup_chinese_fonts(&cc.egui_ctx);
-        Self::default()
+        let mut app = Self::default();
+        if let Some(storage) = cc.storage {
+            if let Some(json) = storage.get_string(STORAGE_KEY_STATE) {
+                if let Ok(p) = serde_json::from_str::<PersistedState>(&json) {
+                    app.current_task = p.current_task;
+                    app.pomo.phase = phase_from_str(&p.phase);
+                    let loaded_state = state_from_str(&p.state);
+                    app.pomo.state = if loaded_state == TimerState::Running {
+                        TimerState::Paused
+                    } else {
+                        loaded_state
+                    };
+                    app.pomo.remaining_secs = p.remaining_secs;
+                    app.pomo.phase_total_secs = p.phase_total_secs;
+                    app.pomo.completed_pomodoros = p.completed_pomodoros;
+                }
+            }
+        }
+        app.load_focus_history_from_db();
+        app
+    }
+
+    /// 从 SQLite 加载专注历史（启动时与统计窗口刷新时用）
+    fn load_focus_history_from_db(&mut self) {
+        if let Ok(conn) = crate::db::open_and_init() {
+            if let Ok(rows) = crate::db::load_focus_records(&conn, 0) {
+                self.focus_history = rows
+                    .into_iter()
+                    .map(|r| FocusRecord {
+                        task: r.task,
+                        duration_secs: r.duration_secs,
+                        completed_at: r.completed_at,
+                        completed_pomodoros: r.completed_pomodoros,
+                    })
+                    .collect();
+            }
+        }
     }
 
     fn phase_label(phase: Phase) -> &'static str {
@@ -294,8 +400,31 @@ impl RedTomatoApp {
 impl eframe::App for RedTomatoApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.pomo.tick(Utc::now());
-        if self.pomo.take_finished_phase().is_some() {
+        if self.pomo.take_finished_phase() == Some(Phase::Focus) {
             play_phase_finished_sound();
+            if let Some(duration_secs) = self.pomo.take_last_completed_focus_duration() {
+                let completed_at = beijing_now_rfc3339();
+                let completed_pomodoros = self.pomo.completed_pomodoros;
+                let task = self.current_task.clone();
+                if let Ok(conn) = crate::db::open_and_init() {
+                    let _ = crate::db::insert_focus_record(
+                        &conn,
+                        &task,
+                        duration_secs,
+                        &completed_at,
+                        completed_pomodoros,
+                    );
+                }
+                self.focus_history.insert(
+                    0,
+                    FocusRecord {
+                        task,
+                        duration_secs,
+                        completed_at,
+                        completed_pomodoros,
+                    },
+                );
+            }
         }
         ctx.request_repaint();
 
@@ -348,6 +477,24 @@ impl eframe::App for RedTomatoApp {
         if self.show_about {
             self.ui_about(ctx);
         }
+        // 统计窗口：按时间列出做了哪些任务、专注时长
+        if self.show_statistics {
+            self.ui_statistics(ctx);
+        }
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        let p = PersistedState {
+            current_task: self.current_task.clone(),
+            phase: phase_to_str(self.pomo.phase).to_string(),
+            state: state_to_str(self.pomo.state).to_string(),
+            remaining_secs: self.pomo.remaining_secs,
+            phase_total_secs: self.pomo.phase_total_secs,
+            completed_pomodoros: self.pomo.completed_pomodoros,
+        };
+        if let Ok(json) = serde_json::to_string(&p) {
+            storage.set_string(STORAGE_KEY_STATE, json);
+        }
     }
 }
 
@@ -372,12 +519,91 @@ impl RedTomatoApp {
                             .size(14.0)
                             .color(egui::Color32::from_rgb(TEXT_DIM.0, TEXT_DIM.1, TEXT_DIM.2)),
                     );
+                    ui.add_space(8.0);
+                    let db_path = crate::db::db_path();
+                    ui.label(
+                        egui::RichText::new("数据 (SQLite)：")
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(TEXT_DIM.0, TEXT_DIM.1, TEXT_DIM.2)),
+                    );
+                    ui.label(
+                        egui::RichText::new(db_path.to_string_lossy().as_ref())
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(TEXT_DIM.0, TEXT_DIM.1, TEXT_DIM.2)),
+                    );
                     ui.add_space(16.0);
                     if ui.button("确定").clicked() {
                         self.show_about = false;
                     }
                 });
             });
+    }
+
+    /// 统计窗口：按完成时间逆序、同任务番茄数累计、番茄数从 1 开始
+    fn ui_statistics(&mut self, ctx: &egui::Context) {
+        use white_text_theme::TEXT_DIM;
+        egui::Window::new("统计 · 专注记录")
+            .default_width(460.0)
+            .default_height(320.0)
+            .show(ctx, |ui| {
+                ui.label("数据保存在 SQLite，路径见「关于」；复制该目录即可迁移。");
+                ui.add_space(4.0);
+                if self.focus_history.is_empty() {
+                    ui.label("暂无记录。完成专注后这里会按时间显示任务、时长与番茄数。");
+                } else {
+                    ui.label("完成时间 · 专注时长 · 番茄数(同任务累计) · 任务");
+                    ui.add_space(6.0);
+                    let rows = Self::focus_rows_sorted_with_cumulative_tomatoes(&self.focus_history);
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for (r, tomato_display) in rows {
+                            let mins = r.duration_secs / 60;
+                            let secs = r.duration_secs % 60;
+                            let duration = format!("{:02}:{:02}", mins, secs);
+                            let completed = r.completed_at.chars().take(19).collect::<String>();
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(completed.as_str())
+                                        .color(egui::Color32::from_rgb(TEXT_DIM.0, TEXT_DIM.1, TEXT_DIM.2))
+                                        .size(12.0),
+                                );
+                                ui.label(" · ");
+                                ui.label(duration);
+                                ui.label(" · ");
+                                ui.label(format!("🍅{}", tomato_display));
+                                ui.label(" · ");
+                                ui.label(if r.task.is_empty() { "(无任务)" } else { r.task.as_str() });
+                            });
+                        }
+                    });
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("刷新").clicked() {
+                        self.load_focus_history_from_db();
+                    }
+                    if ui.button("关闭").clicked() {
+                        self.show_statistics = false;
+                    }
+                });
+            });
+    }
+
+    /// 按完成时间逆序排列，并计算同任务番茄数累计（番茄数从 1 开始，0 按 1 计）
+    fn focus_rows_sorted_with_cumulative_tomatoes(
+        history: &[FocusRecord],
+    ) -> Vec<(&FocusRecord, u32)> {
+        let mut list: Vec<_> = history.iter().map(|r| (r, r.completed_at.as_str())).collect();
+        list.sort_by(|a, b| a.1.cmp(b.1)); // 时间正序（最旧在前）
+        let mut task_cumulative: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let mut with_sum: Vec<(&FocusRecord, u32)> = Vec::with_capacity(list.len());
+        for (r, _) in list {
+            let add = if r.completed_pomodoros == 0 { 1 } else { r.completed_pomodoros };
+            let sum = task_cumulative.entry(r.task.clone()).or_insert(0);
+            *sum += add;
+            with_sum.push((r, *sum));
+        }
+        with_sum.sort_by(|a, b| b.0.completed_at.cmp(&a.0.completed_at)); // 时间逆序（最新在前）
+        with_sum
     }
 
     fn ui_full(&mut self, ctx: &egui::Context) {
@@ -415,7 +641,18 @@ impl RedTomatoApp {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                     });
-                    ui.add_space(16.0);
+                    ui.add_space(12.0);
+
+                    // 当前任务：与番茄钟关联，专注时明确「在做哪件事」
+                    ui.horizontal(|ui| {
+                        ui.label("当前任务：");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.current_task)
+                                .desired_width(240.0)
+                                .hint_text("输入本番茄要完成的事…"),
+                        );
+                    });
+                    ui.add_space(8.0);
 
                     // 所处阶段文案，颜色与进度条一致（随阶段切换：绿/蓝/红）
                     ui.label(
@@ -442,7 +679,7 @@ impl RedTomatoApp {
                     ui.add(bar);
                     ui.add_space(20.0);
 
-                    // 开始/暂停、停止 同一行（文字居中）；钉住已移至左上角钉子图标
+                    // 开始/暂停、重置、完成 同一行（文字居中）
                     let btn_size = egui::vec2(88.0, 36.0);
                     ui.horizontal(|ui| {
                         let (label, action) = match self.pomo.state {
@@ -461,10 +698,13 @@ impl RedTomatoApp {
                                 _ => {}
                             }
                         }
-                        if self.pomo.state != TimerState::Idle {
-                            if centered_button(ui, "停止", btn_size).clicked() {
-                                self.pomo.stop();
-                            }
+                        if centered_button(ui, "重置", btn_size).on_hover_text("清空当前任务并重置番茄数").clicked() {
+                            self.current_task.clear();
+                            self.pomo.reset_pomodoros_and_stop();
+                        }
+                        if centered_button(ui, "完成", btn_size).on_hover_text("完成当前任务并重置，开始下一项").clicked() {
+                            self.current_task.clear();
+                            self.pomo.reset_pomodoros_and_stop();
                         }
                     });
                     ui.add_space(24.0);
@@ -495,9 +735,15 @@ impl RedTomatoApp {
                         paint_pomodoro_circles(ui, n, done);
                     });
                     ui.add_space(8.0);
-                    if ui.link("关于").clicked() {
-                        self.show_about = true;
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.link("关于").clicked() {
+                            self.show_about = true;
+                        }
+                        ui.label(" ");
+                        if ui.link("统计").clicked() {
+                            self.show_statistics = true;
+                        }
+                    });
                     ui.add_space(12.0);
                 });
             });
@@ -544,6 +790,22 @@ impl RedTomatoApp {
                     });
                     ui.add_space(2.0);
 
+                    // 钉住模式下显示当前任务（若有），便于专注时看到「在做哪件事」
+                    if !self.current_task.is_empty() {
+                        let truncate_len = 18;
+                        let display = if self.current_task.chars().count() > truncate_len {
+                            format!("{}…", self.current_task.chars().take(truncate_len).collect::<String>())
+                        } else {
+                            self.current_task.clone()
+                        };
+                        ui.label(
+                            egui::RichText::new(display)
+                                .color(egui::Color32::from_rgb(TEXT_WHITE.0, TEXT_WHITE.1, TEXT_WHITE.2))
+                                .size(12.0),
+                        );
+                        ui.add_space(2.0);
+                    }
+
                     // 大号白字计时（White Text 风格）
                     ui.label(
                         egui::RichText::new(self.pomo.remaining_display())
@@ -575,28 +837,19 @@ impl RedTomatoApp {
                     ui.add(bar);
                     ui.add_space(6.0);
 
-                    // 开始/暂停（一个按钮切换）+ 停止（文字居中），按可用宽度分配避免裁切
+                    // 开始/暂停（一个按钮切换），按可用宽度分配
                     let compact_btn = egui::vec2(72.0, 28.0);
                     ui.horizontal(|ui| {
-                        let available = ui.available_width();
-                        let need = compact_btn.x * 2.0 + 12.0;
-                        let btn_w = if available >= need { compact_btn.x } else { ((available - 12.0) / 2.0).at_least(44.0) };
-                        let btn_size = egui::vec2(btn_w, compact_btn.y);
                         let (label, action) = match self.pomo.state {
                             TimerState::Idle => ("开始", 0u8),
                             TimerState::Running => ("暂停", 1u8),
                             TimerState::Paused => ("继续", 2u8),
                         };
-                        if centered_button(ui, label, btn_size).clicked() {
+                        if centered_button(ui, label, compact_btn).clicked() {
                             if action == 0 {
                                 self.pomo.start();
                             } else {
                                 self.pomo.toggle_pause();
-                            }
-                        }
-                        if self.pomo.state != TimerState::Idle {
-                            if centered_button(ui, "停止", btn_size).clicked() {
-                                self.pomo.stop();
                             }
                         }
                     });

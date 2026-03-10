@@ -9,9 +9,6 @@ use std::sync::Arc;
 
 use crate::pomodoro::{Phase, PomodoroState, TimerState};
 
-/// 桌面右上角边距（逻辑像素）
-const PIN_MARGIN: f32 = 16.0;
-
 /// White Text 主题色（参考 OnePomodoro WhiteTextView.xaml.cs）
 mod white_text_theme {
     /// 专注/番茄阶段：红 PointLight
@@ -229,32 +226,10 @@ fn try_remove_system_menu(_frame: &eframe::Frame) -> bool {
     false
 }
 
-/// 计算窗口钉在桌面右上角时的位置
-fn pin_position_top_right(ctx: &egui::Context) -> Option<egui::Pos2> {
-    ctx.input(|i| {
-        let outer_rect = i.viewport().outer_rect?;
-        let size = outer_rect.size();
-        let monitor_size = i.viewport().monitor_size?;
-        if 1.0 < monitor_size.x && 1.0 < monitor_size.y {
-            let x = monitor_size.x - size.x - PIN_MARGIN;
-            let y = PIN_MARGIN;
-            Some(egui::pos2(x, y))
-        } else {
-            None
-        }
-    })
-}
-
-/// 应用 pin 状态：置顶 + 移到右上角。返回是否成功应用了位置（用于重试）
-fn apply_pin(ctx: &egui::Context) -> bool {
+/// 应用钉住：仅置顶，不移动窗口（窗口保持在当前拖动到的位置）
+fn apply_pin(ctx: &egui::Context) {
     use egui::viewport::{ViewportCommand, WindowLevel};
     ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::AlwaysOnTop));
-    if let Some(pos) = pin_position_top_right(ctx) {
-        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
-        true
-    } else {
-        false
-    }
 }
 
 /// 取消 pin：恢复普通窗口层级并立即恢复完整窗口尺寸，避免下一帧仍用紧凑尺寸绘制完整界面
@@ -434,7 +409,8 @@ impl eframe::App for RedTomatoApp {
 
         // 应用 pin：默认钉在右上角并置顶（首帧可能无 monitor 信息，会下一帧重试）
         if self.pinned && !self.pin_applied {
-            self.pin_applied = apply_pin(ctx);
+            apply_pin(ctx);
+            self.pin_applied = true;
         }
 
         // 启动时若为完整模式：强制设一次窗口尺寸，避免 eframe 持久化恢复成小窗口导致界面被裁切
@@ -443,16 +419,18 @@ impl eframe::App for RedTomatoApp {
                 FULL_SIZE.0,
                 FULL_SIZE.1,
             )));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(false));
             self.initial_full_size_applied = true;
         }
 
-        // 紧凑模式（钉到右上角）：小窗 + 无标题栏
+        // 紧凑模式（钉到右上角）：小窗 + 无标题栏 + 透明背景（便于看背后内容）
         if self.compact && !self.compact_size_applied {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
                 COMPACT_WIDTH,
                 COMPACT_HEIGHT,
             )));
             ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
             self.compact_size_applied = true;
             self.full_no_decorations_applied = false;
             self.system_menu_removed = false;
@@ -464,12 +442,13 @@ impl eframe::App for RedTomatoApp {
             self.full_no_decorations_applied = true;
         }
 
-        // 从紧凑回到完整模式：恢复窗口尺寸（不恢复系统标题栏）
+        // 从紧凑回到完整模式：恢复窗口尺寸与不透明（不恢复系统标题栏）
         if !self.compact && !self.full_restore_applied {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
                 FULL_SIZE.0,
                 FULL_SIZE.1,
             )));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(false));
             self.full_restore_applied = true;
             self.full_no_decorations_applied = false; // 下一帧会再次发 Decorations(false)
             self.system_menu_removed = false;
@@ -482,6 +461,7 @@ impl eframe::App for RedTomatoApp {
 
         if self.compact {
             self.ui_compact(ctx);
+            // 不启用 MousePassthrough：否则在部分系统上整窗收不到点击，无法点「取消钉住」/暂停/关闭
         } else {
             self.ui_full(ctx);
         }
@@ -493,6 +473,21 @@ impl eframe::App for RedTomatoApp {
         // 统计窗口：按时间列出做了哪些任务、专注时长
         if self.show_statistics {
             self.ui_statistics(ctx);
+        }
+    }
+
+    /// 钉住模式下背景透明，便于看到背后内容；非钉住为深色不透明
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        if self.compact {
+            [0.0, 0.0, 0.0, 0.0] // 全透明
+        } else {
+            use white_text_theme::BG_RGB;
+            [
+                BG_RGB.0 as f32 / 255.0,
+                BG_RGB.1 as f32 / 255.0,
+                BG_RGB.2 as f32 / 255.0,
+                1.0,
+            ]
         }
     }
 
@@ -634,11 +629,11 @@ impl RedTomatoApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(BG_RGB.0, BG_RGB.1, BG_RGB.2)))
             .show(ctx, |ui| {
-                // 顶栏单独占满宽度，关闭按钮固定右上角
+                // 顶栏：钉子（左）+ 可拖动区域（拖窗）+ 关闭（右）
                 ui.horizontal(|ui| {
                     if ui
                         .add(egui::Button::new("📌").frame(false))
-                        .on_hover_text("钉到桌面右上角")
+                        .on_hover_text("钉住：置顶并保持当前位置")
                         .clicked()
                     {
                         self.pinned = true;
@@ -646,7 +641,16 @@ impl RedTomatoApp {
                         self.compact_size_applied = false;
                         self.pin_applied = false;
                     }
-                    ui.add_space(ui.available_width() - 32.0);
+                    let drag_width = ui.available_width() - 32.0;
+                    let drag_height = 32.0;
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(drag_width, drag_height),
+                        egui::Sense::drag(),
+                    );
+                    if response.drag_started() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                    response.on_hover_text("拖动移动窗口");
                     let close_btn = egui::Button::new(egui::RichText::new("×").size(18.0)).frame(false);
                     if ui.add_sized(egui::vec2(32.0, 32.0), close_btn).on_hover_text("关闭").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -763,7 +767,7 @@ impl RedTomatoApp {
     }
 
     fn ui_compact(&mut self, ctx: &egui::Context) {
-        use white_text_theme::{BG_RGB, TEXT_WHITE};
+        use white_text_theme::TEXT_WHITE;
 
         // 进度条颜色：专注绿、短休息黄、长休息红
         let (accent_r, accent_g, accent_b) = match self.pomo.phase {
@@ -772,13 +776,10 @@ impl RedTomatoApp {
             Phase::LongBreak => (217, 17, 83),     // 红色
         };
 
+        // 钉住模式：背景透明，不画整窗图案，避免挡住背后内容
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(BG_RGB.0, BG_RGB.1, BG_RGB.2)))
+            .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
             .show(ctx, |ui| {
-                let rect = ui.available_rect_before_wrap();
-                // 背景几何图案（类似 WhiteText 的质感）
-                paint_subtle_pattern(ui, rect);
-
                 // 顶栏：取消钉住（左）+ 关闭固定右上角（右）
                 ui.horizontal(|ui| {
                     if ui

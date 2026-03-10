@@ -46,6 +46,7 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([380.0, 540.0])
             .with_title("红番茄")
             .with_decorations(false) // 无系统标题栏，与钉住模式一致，仅保留自定义顶栏
+            .with_transparent(true)  // 钉住模式下需要透明背景与点击穿透
             .with_icon(icon),
         ..Default::default()
     };

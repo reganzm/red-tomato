@@ -643,7 +643,7 @@ impl RedTomatoApp {
                     }
                     let drag_width = ui.available_width() - 32.0;
                     let drag_height = 32.0;
-                    let (rect, response) = ui.allocate_exact_size(
+                    let (_rect, response) = ui.allocate_exact_size(
                         egui::vec2(drag_width, drag_height),
                         egui::Sense::drag(),
                     );
@@ -767,7 +767,8 @@ impl RedTomatoApp {
     }
 
     fn ui_compact(&mut self, ctx: &egui::Context) {
-        use white_text_theme::TEXT_WHITE;
+        // 钉住模式：透明背景下文字用黑色
+        const TEXT_BLACK: (u8, u8, u8) = (0, 0, 0);
 
         // 进度条颜色：专注绿、短休息黄、长休息红
         let (accent_r, accent_g, accent_b) = match self.pomo.phase {
@@ -776,9 +777,10 @@ impl RedTomatoApp {
             Phase::LongBreak => (217, 17, 83),     // 红色
         };
 
-        // 钉住模式：背景透明，不画整窗图案，避免挡住背后内容
+        // 钉住模式：半透明浅色背景 + 黑字，保证在深色/浅色桌面都能看清
+        let compact_bg = egui::Color32::from_rgba_unmultiplied(252, 252, 254, 248);
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
+            .frame(egui::Frame::NONE.fill(compact_bg))
             .show(ctx, |ui| {
                 // 顶栏：取消钉住（左）+ 关闭固定右上角（右）
                 ui.horizontal(|ui| {
@@ -794,7 +796,9 @@ impl RedTomatoApp {
                         apply_unpin(ctx);
                     }
                     ui.add_space(ui.available_width() - 32.0);
-                    let close_btn = egui::Button::new(egui::RichText::new("×").size(18.0)).frame(false);
+                    let close_btn = egui::Button::new(
+                        egui::RichText::new("×").size(18.0).color(egui::Color32::from_rgb(TEXT_BLACK.0, TEXT_BLACK.1, TEXT_BLACK.2)),
+                    ).frame(false);
                     if ui.add_sized(egui::vec2(32.0, 32.0), close_btn).on_hover_text("关闭").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
@@ -813,16 +817,16 @@ impl RedTomatoApp {
                         };
                         ui.label(
                             egui::RichText::new(display)
-                                .color(egui::Color32::from_rgb(TEXT_WHITE.0, TEXT_WHITE.1, TEXT_WHITE.2))
+                                .color(egui::Color32::from_rgb(TEXT_BLACK.0, TEXT_BLACK.1, TEXT_BLACK.2))
                                 .size(12.0),
                         );
                         ui.add_space(2.0);
                     }
 
-                    // 大号白字计时（White Text 风格）
+                    // 大号黑字计时（钉住模式透明背景用黑字）
                     ui.label(
                         egui::RichText::new(self.pomo.remaining_display())
-                            .color(egui::Color32::from_rgb(TEXT_WHITE.0, TEXT_WHITE.1, TEXT_WHITE.2))
+                            .color(egui::Color32::from_rgb(TEXT_BLACK.0, TEXT_BLACK.1, TEXT_BLACK.2))
                             .size(42.0)
                             .monospace(),
                     );
@@ -836,7 +840,7 @@ impl RedTomatoApp {
                     };
                     ui.label(
                         egui::RichText::new(phase_text)
-                            .color(egui::Color32::from_rgb(accent_r, accent_g, accent_b))
+                            .color(egui::Color32::from_rgb(TEXT_BLACK.0, TEXT_BLACK.1, TEXT_BLACK.2))
                             .size(14.0),
                     );
                     ui.add_space(8.0);
